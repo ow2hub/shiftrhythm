@@ -596,6 +596,7 @@ def render_video(scenes, timeline, chars, narration, mp4, vertical=None, opening
     """タイムラインどおりに動画を書き出す。vertical を渡すと縦型で包む."""
     size = (SHORT_W, SHORT_H) if vertical else (W, H)
     proc = open_encoder(size, narration, mp4)
+    pop = pop_in_frames(opening) if opening is not None else []
     bg_cache, cur_scene, scene_t = None, -1, 0.0
     for item in timeline:
         scene = scenes[item["scene"]]
@@ -606,8 +607,9 @@ def render_video(scenes, timeline, chars, narration, mp4, vertical=None, opening
             scene_t = 0.0
         n_frames = max(1, int(round(item["dur"] * FPS)))
         if hero:
-            for _ in range(n_frames):
-                proc.stdin.write(opening.tobytes())
+            # 最初の数フレームだけ拡大して出す(静止画の出だしは動きが無いと切られる)
+            for fi in range(n_frames):
+                proc.stdin.write((pop[fi] if fi < len(pop) else opening).tobytes())
             scene_t += item["dur"]
             continue
         bubble, bub_h = render_bubble(item["line"]["text"], item["line"]["sp"])
@@ -687,6 +689,18 @@ def shorts_opening_card(short):
     d.text((SHORT_W // 2, 1760), CHANNEL, font=font(FONT_BOLD, 44),
            fill=(150, 142, 128), anchor="ma")
     return img
+
+
+def pop_in_frames(card, n=5):
+    """冒頭カードが出るときの、ひと呼吸ぶんの拡大アニメ."""
+    out = []
+    for i in range(n):
+        k = 1.10 - 0.10 * ((i + 1) / n)          # 1.10倍から等倍へ
+        w, h = int(SHORT_W * k), int(SHORT_H * k)
+        big = card.resize((w, h), Image.BILINEAR)
+        x, y = (w - SHORT_W) // 2, (h - SHORT_H) // 2
+        out.append(big.crop((x, y, x + SHORT_W, y + SHORT_H)))
+    return out
 
 
 def wrap_vertical(frame, backdrop):
