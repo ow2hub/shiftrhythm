@@ -113,6 +113,12 @@ SPEAKERS = {
 LINE_PAUSE = 0.40       # セリフ間の空白(秒)
 SCENE_PAUSE = 0.9       # シーンの切れ目はさらに長く取る
 
+# Shortsは本編と同じテンポだと遅い。冒頭1秒で判断されるので詰める。
+SHORT_SPEED = 1.12      # 読み上げ速度(本編は1.0)
+SHORT_LINE_PAUSE = 0.18
+SHORT_SCENE_PAUSE = 0.35
+SPEED = 1.0             # tts_voicevox が参照する。ショート生成中だけ上書きする
+
 # ---------------------------------------------------------------------------
 # 台本
 #   visual: bullets / stat / bars   impact=True で集中線
@@ -153,7 +159,7 @@ def tts_voicevox(text, speaker_id, out_wav, base=VOICEVOX_URL):
     req = urllib.request.Request(f"{base}/audio_query?{q}", method="POST")
     with urllib.request.urlopen(req, timeout=30) as r:
         query = json.load(r)
-    query["speedScale"] = 1.0    # 数字の多い動画なので、速めず聞き取りやすさを優先
+    query["speedScale"] = SPEED  # 本編は1.0。ショートは SHORT_SPEED に差し替わる
     query["prePhonemeLength"] = 0.05
     query["postPhonemeLength"] = 0.1
     body = json.dumps(query).encode()
@@ -502,7 +508,8 @@ def render_bubble(text, speaker):
 # ---------------------------------------------------------------------------
 # 音声・フレームの生成(本編とShortsで共用)
 # ---------------------------------------------------------------------------
-def synthesize(scenes, audio_dir, engine, narration, quiet=False):
+def synthesize(scenes, audio_dir, engine, narration, quiet=False,
+               line_pause=None, scene_pause=None):
     """台本を読み上げてwavにまとめ、(タイムライン, チャプター, 合計秒)を返す."""
     timeline, chapters, all_audio = [], [], []
     elapsed, rate = 0.0, None
@@ -518,7 +525,9 @@ def synthesize(scenes, audio_dir, engine, narration, quiet=False):
             else:
                 tts_openjtalk(text, spec["ojt"], wav)
             samples, rate = read_wav(wav)
-            pause = SCENE_PAUSE if li == len(scene["lines"]) - 1 else LINE_PAUSE
+            lp = LINE_PAUSE if line_pause is None else line_pause
+            sp_ = SCENE_PAUSE if scene_pause is None else scene_pause
+            pause = sp_ if li == len(scene["lines"]) - 1 else lp
             dur = len(samples) / rate + pause
             timeline.append({"scene": si, "line": line, "dur": dur,
                              "env": mouth_envelope(samples, rate, dur, FPS)})
@@ -583,19 +592,26 @@ def open_encoder(size, narration, mp4):
 # ---------------------------------------------------------------------------
 # 本体
 # ---------------------------------------------------------------------------
-def render_video(scenes, timeline, chars, narration, mp4, vertical=None):
+def render_video(scenes, timeline, chars, narration, mp4, vertical=None, opening=None):
     """タイムラインどおりに動画を書き出す。vertical を渡すと縦型で包む."""
     size = (SHORT_W, SHORT_H) if vertical else (W, H)
     proc = open_encoder(size, narration, mp4)
     bg_cache, cur_scene, scene_t = None, -1, 0.0
     for item in timeline:
         scene = scenes[item["scene"]]
+        hero = bool(vertical and scene.get("_opening"))
         if item["scene"] != cur_scene:
             cur_scene = item["scene"]
-            bg_cache = scene_background(scene)
+            bg_cache = None if hero else scene_background(scene)
             scene_t = 0.0
+        n_frames = max(1, int(round(item["dur"] * FPS)))
+        if hero:
+            for _ in range(n_frames):
+                proc.stdin.write(opening.tobytes())
+            scene_t += item["dur"]
+            continue
         bubble, bub_h = render_bubble(item["line"]["text"], item["line"]["sp"])
-        for fi in range(max(1, int(round(item["dur"] * FPS)))):
+        for fi in range(n_frames):
             frame = compose_frame(scene, item, fi, fi / FPS, scene_t,
                                   chars, bg_cache, bubble, bub_h)
             if vertical:
@@ -637,6 +653,42 @@ def shorts_backdrop(short):
     return img
 
 
+def shorts_opening_card(short):
+    """ショートの冒頭に出す、画面いっぱいの大文字カード.
+
+    ショートは最初の1秒で判断されるので、ここでは本編の画面を出さない。
+    結論だけを、読める最大の字で置く。
+    """
+    img = Image.new("RGB", (SHORT_W, SHORT_H), CREAM)
+    d = ImageDraw.Draw(img)
+    for y in range(0, SHORT_H, 44):
+        for x in range(0, SHORT_W, 44):
+            d.ellipse([x, y, x + 7, y + 7], fill=(240, 232, 214))
+    draw_burst(d, SHORT_W // 2, 820, n=34, r0=240, r1=1500, color=(255, 232, 178))
+
+    lines = short["hook"].split("\n")
+    size = 150
+    while size > 56 and any(d.textlength(l, font=font(FONT_BOLD, size)) > SHORT_W - 110
+                            for l in lines):
+        size -= 4
+    f = font(FONT_BOLD, size)
+    lh = size + 34
+    y = 820 - (len(lines) * lh - 34) // 2
+    for i, ln in enumerate(lines):
+        # 落ちは最後の行に置く約束なので、そこだけ色を変えて目を留める
+        col = PINK if i == len(lines) - 1 and len(lines) > 1 else INK
+        outlined_text(d, (SHORT_W // 2, y), ln, f, col, WHITE, 9, anchor="ma")
+        y += lh
+
+    # 下にキャラを置いて、チャンネルの顔を一瞬で見せる
+    for key, x in (("noa", 110), ("mei", 600)):
+        sp = draw_character(key, 0.7, False, False).resize((370, 370), Image.LANCZOS)
+        img.paste(sp, (x, 1360), sp)
+    d.text((SHORT_W // 2, 1760), CHANNEL, font=font(FONT_BOLD, 44),
+           fill=(150, 142, 128), anchor="ma")
+    return img
+
+
 def wrap_vertical(frame, backdrop):
     """横型フレームを縮小して、Shortsの背景の真ん中に貼る."""
     img = backdrop.copy()
@@ -646,19 +698,41 @@ def wrap_vertical(frame, backdrop):
 
 
 def build_shorts(out, engine, chars):
-    """本編から切り出した縦型ショートを書き出す."""
-    for si, short in enumerate(SHORTS, 1):
-        scenes = [SCENES[i] for i in short["scenes"]]
-        audio_dir = out / f"audio_short{si}"
-        audio_dir.mkdir(parents=True, exist_ok=True)
-        narration = out / f"short{si}.wav"
-        timeline, _, total = synthesize(scenes, audio_dir, engine, narration, quiet=True)
-        mp4 = out / f"short{si}.mp4"
-        render_video(scenes, timeline, chars, narration, mp4,
-                     vertical=shorts_backdrop(short))
-        print(f"[short {si}] {total:.0f}秒 / {short['title']} -> {mp4}")
-        if total > 175:
-            print("    ※3分を超えるとShortsになりません。シーンを減らしてください。")
+    """本編から切り出した縦型ショートを書き出す.
+
+    冒頭は本編のセリフを使わず、`opening` に書いた1行の断定から始める。
+    ショートは最初の1秒で判断されるので、前置きから入ると全部スワイプされる。
+    """
+    global SPEED
+    SPEED = SHORT_SPEED
+    try:
+        for si, short in enumerate(SHORTS, 1):
+            scenes = []
+            if short.get("opening"):
+                scenes.append({"visual": {"type": "bullets", "kicker": "", "title": "",
+                                          "items": []},
+                               "lines": short["opening"], "_opening": True})
+            scenes += [SCENES[i] for i in short["scenes"]]
+
+            audio_dir = out / f"audio_short{si}"
+            audio_dir.mkdir(parents=True, exist_ok=True)
+            narration = out / f"short{si}.wav"
+            timeline, _, total = synthesize(
+                scenes, audio_dir, engine, narration, quiet=True,
+                line_pause=SHORT_LINE_PAUSE, scene_pause=SHORT_SCENE_PAUSE)
+            mp4 = out / f"short{si}.mp4"
+            render_video(scenes, timeline, chars, narration, mp4,
+                         vertical=shorts_backdrop(short),
+                         opening=shorts_opening_card(short))
+            head = sum(t["dur"] for t in timeline if scenes[t["scene"]].get("_opening"))
+            print(f"[short {si}] {total:.0f}秒(冒頭カード {head:.1f}秒) / "
+                  f"{short['title']} -> {mp4}")
+            if not short.get("opening"):
+                print("    ※openingが無いので本編のセリフから始まります。冒頭で切られます。")
+            if total > 175:
+                print("    ※3分を超えるとShortsになりません。シーンを減らしてください。")
+    finally:
+        SPEED = 1.0
 
 
 def main():
