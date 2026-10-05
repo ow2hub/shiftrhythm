@@ -21,8 +21,9 @@ ARCHIVE = BASE / "archive"
 
 # 回ごとに作られるもの(退避の対象)
 FILES = ["books.csv", "canonical.json", "claims.txt", "report.md",
-         "video_numbers.py", "tocs.md"]
-DIRS = ["responses", "prompts_out", "extracted"]
+         "video_numbers.py", "tocs.md", "compare_report.md"]
+DIRS = ["responses", "prompts_out", "extracted",
+        "compare_out", "responses_compare"]
 KEEP_IN_BOOKS = {"_template.md"}
 
 
