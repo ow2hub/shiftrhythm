@@ -38,6 +38,16 @@ HEADER_B = """次の6つの依頼に、それぞれ答えてください。
 
 """
 
+# C: 条件を言葉で書かず、見本だけを渡す。A(言葉だけ)と比べるための条件群。
+HEADER_C = """次の6つの依頼に、それぞれ答えてください。
+**各依頼には「出力の見本」が付いています。その形式に合わせて答えてください。**
+
+- 依頼ごとに `=== t1 ===` のような見出しを付けてから答えを書くこと
+- 見出しの行には、答えを書かないこと
+- 前置きや後書きは書かないこと
+
+"""
+
 
 def lines_of(text):
     return [l.strip() for l in text.strip().splitlines() if l.strip()]
@@ -136,27 +146,35 @@ TASKS = [
 ]
 
 
-def build(with_example):
+def build(side):
+    """A=条件だけ / B=条件+見本 / C=見本だけ."""
     body = []
-    for i, t in enumerate(TASKS, 1):
-        block = [f"\n--- {t['id']} ---", f"依頼: {t['request']}", f"条件:\n{t['conds']}"]
-        if with_example:
+    for t in TASKS:
+        block = [f"\n--- {t['id']} ---", f"依頼: {t['request']}"]
+        if side in ("A", "B"):
+            block.append(f"条件:\n{t['conds']}")
+        if side in ("B", "C"):
             block.append(f"出力の見本:\n{t['example']}")
         body.append("\n".join(block) + "\n")
-    return (HEADER_B if with_example else HEADER_A) + "".join(body)
+    head = {"A": HEADER_A, "B": HEADER_B, "C": HEADER_C}[side]
+    return head + "".join(body)
 
 
-def do_init():
+SIDES = ("A", "B", "C")
+
+
+def do_init(only=None):
     OUT_DIR.mkdir(exist_ok=True)
     RESP_DIR.mkdir(exist_ok=True)
+    sides = SIDES if not only else [s for s in SIDES if s in only]
     for run in range(1, RUNS + 1):
-        (OUT_DIR / f"A_run{run}.txt").write_text(build(False), encoding="utf-8")
-        (OUT_DIR / f"B_run{run}.txt").write_text(build(True), encoding="utf-8")
-    print(f"プロンプトを{RUNS * 2}個 作りました: {OUT_DIR}")
-    print(f"  A = 見本なし / B = 見本あり(依頼と条件はまったく同じ)")
-    print("\n次にやること(4回とも「新しいチャット」で):")
+        for side in sides:
+            (OUT_DIR / f"{side}_run{run}.txt").write_text(build(side), encoding="utf-8")
+    print(f"プロンプトを{RUNS * len(sides)}個 作りました: {OUT_DIR}")
+    print("  A = 条件だけ / B = 条件+見本 / C = 見本だけ(依頼はすべて同じ)")
+    print(f"\n次にやること({RUNS * len(sides)}回とも「新しいチャット」で):")
     for run in range(1, RUNS + 1):
-        for side in ("A", "B"):
+        for side in sides:
             print(f"  touch experiment_responses/{side}_run{run}.txt && "
                   f"open -e experiment_out/{side}_run{run}.txt "
                   f"experiment_responses/{side}_run{run}.txt")
@@ -183,7 +201,7 @@ def do_score():
     if not RESP_DIR.exists() or not any(RESP_DIR.glob("*.txt")):
         sys.exit(f"{RESP_DIR}/ に答えがありません。")
 
-    by_side = {"A": [], "B": []}
+    by_side = {s: [] for s in SIDES}
     for path in sorted(RESP_DIR.glob("*.txt")):
         side = path.name[0].upper()
         if side not in by_side:
@@ -197,9 +215,11 @@ def do_score():
     if not by_side["A"] or not by_side["B"]:
         sys.exit("AとBの両方が必要です。")
 
-    rows, totals = [], {"A": [0, 0], "B": [0, 0]}
-    per_task = {t["id"]: {"A": [0, 0], "B": [0, 0]} for t in TASKS}
-    for side, runs in by_side.items():
+    present = [s for s in SIDES if by_side[s]]
+    rows, totals = [], {s: [0, 0] for s in present}
+    per_task = {t["id"]: {s: [0, 0] for s in present} for t in TASKS}
+    for side in present:
+        runs = by_side[side]
         for fname, answers in runs:
             for t in TASKS:
                 ans = answers.get(t["id"], "")
@@ -217,18 +237,24 @@ def do_score():
     def pct(p):
         return f"{p[0]}/{p[1]} = {p[0] / p[1] * 100:.0f}%" if p[1] else "-"
 
+    LABEL = {"A": "条件だけ(A)", "B": "条件+見本(B)", "C": "見本だけ(C)"}
     out = ["# 「出力の見本を示す」は効くのか — 実験レポート", "",
            "※experiment.py が自動生成しています。",
            "※採点はすべて機械判定(文字数・行数・前方一致)。AIには採点させていません。", "",
-           "## 結果", "",
-           f"- 見本なし(A): **{pct(totals['A'])}**",
-           f"- 見本あり(B): **{pct(totals['B'])}**", ""]
-    diff = (totals["B"][0] / totals["B"][1] - totals["A"][0] / totals["A"][1]) * 100
-    out.append(f"- 差: **{diff:+.0f}ポイント**")
-    out += ["", "## 依頼ごと", "", "| 依頼 | 見本なし | 見本あり |", "|---|---|---|"]
+           "## 結果", ""]
+    for s_ in present:
+        out.append(f"- {LABEL[s_]}: **{pct(totals[s_])}**")
+    out.append("")
+    base = totals[present[0]]
+    for s_ in present[1:]:
+        d = (totals[s_][0] / totals[s_][1] - base[0] / base[1]) * 100
+        out.append(f"- {LABEL[present[0]]} との差({LABEL[s_]}): **{d:+.0f}ポイント**")
+    out += ["", "## 依頼ごと", "",
+            "| 依頼 | " + " | ".join(LABEL[s_] for s_ in present) + " |",
+            "|---" * (len(present) + 1) + "|"]
     for t in TASKS:
         p = per_task[t["id"]]
-        out.append(f"| {t['id']} | {pct(p['A'])} | {pct(p['B'])} |")
+        out.append(f"| {t['id']} | " + " | ".join(pct(p[s_]) for s_ in present) + " |")
 
     out += ["", "## 外れた条件(どこで落ちたか)", ""]
     for side, fname, tid, name, ok in rows:
@@ -236,19 +262,20 @@ def do_score():
             out.append(f"- [{side}] {tid} / {name}({fname})")
 
     (BASE / "experiment_report.md").write_text("\n".join(out) + "\n", encoding="utf-8")
-    print(f"見本なし(A): {pct(totals['A'])}")
-    print(f"見本あり(B): {pct(totals['B'])}")
-    print(f"差: {diff:+.0f}ポイント")
+    for s_ in present:
+        print(f"{LABEL[s_]}: {pct(totals[s_])}")
     print("\n出力: experiment_report.md")
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--init", action="store_true", help="プロンプトA/Bを作る")
+    ap.add_argument("--init", action="store_true", help="プロンプトを作る(A/B/C)")
+    ap.add_argument("--only", default=None,
+                    help="作る条件群を絞る(例: --only C)")
     ap.add_argument("--score", action="store_true", help="答えを読んで採点する")
     args = ap.parse_args()
     if args.init:
-        do_init()
+        do_init(args.only)
     elif args.score:
         do_score()
     else:
