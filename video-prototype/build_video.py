@@ -760,12 +760,14 @@ def compose_frame(scene, item, fi, t, scene_t, chars, bg_cache, bubble, bub_h):
     line = item["line"]
     frame = bg_cache.copy()
     draw_visual_anim(frame, scene, scene_t + t)
+    # 溜めの間(声が出る前)は、吹き出しも反応も出さない。文字で答えがバレるため
+    hold = t < float(line.get("pause_before", 0.0))
     # キャラ(話者は揺れ+口パク、聞き手はトーンダウン)
     #   line["face"]  = 話し手の表情 / line["react"] = 聞き手の表情
     for key in SPEAKERS:
         talking = key == speaker
         face = line.get("face", "normal") if talking else line.get("react", "normal")
-        if face not in FACES:
+        if face not in FACES or hold:
             face = "normal"
         m = int(round(item["env"][min(fi, len(item["env"]) - 1)] * 3)) if talking else 0
         blink = face == "normal" and (int((scene_t + t) * 1000) % 3400) < 130
@@ -774,7 +776,10 @@ def compose_frame(scene, item, fi, t, scene_t, chars, bg_cache, bubble, bub_h):
             bob -= int(6 * max(0.0, 1 - t / 0.25))          # 驚いた瞬間だけ跳ねる
         sprite = chars[(key, not talking, blink, m, face)]
         frame.paste(sprite, (CHAR_X[SPEAKERS[key]["side"]], CHAR_Y + bob), sprite)
-    # 吹き出し(登場時にポップイン)
+    if hold:
+        return frame
+    # 吹き出し(登場時にポップイン)。溜めがあるなら、声が出る瞬間から数える
+    t = t - float(line.get("pause_before", 0.0))
     pop = min(1.0, t / 0.16)
     scale = 0.86 + 0.18 * pop - 0.04 * max(0.0, math.sin(pop * math.pi))
     bx = BUBBLE_LEFT[SPEAKERS[speaker]["side"]] - BUBBLE_M
