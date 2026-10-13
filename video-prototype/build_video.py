@@ -40,7 +40,7 @@ import wave
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
 # ---------------------------------------------------------------------------
 # 基本設定
@@ -154,12 +154,13 @@ def voicevox_available(base=VOICEVOX_URL):
         return False
 
 
-def tts_voicevox(text, speaker_id, out_wav, base=VOICEVOX_URL):
+def tts_voicevox(text, speaker_id, out_wav, base=VOICEVOX_URL, speed=1.0):
     q = urllib.parse.urlencode({"text": text, "speaker": speaker_id})
     req = urllib.request.Request(f"{base}/audio_query?{q}", method="POST")
     with urllib.request.urlopen(req, timeout=30) as r:
         query = json.load(r)
-    query["speedScale"] = SPEED  # 本編は1.0。ショートは SHORT_SPEED に差し替わる
+    # 本編は1.0、ショートは SHORT_SPEED。さらにセリフごとに speed で上書きできる
+    query["speedScale"] = SPEED * speed
     query["prePhonemeLength"] = 0.05
     query["postPhonemeLength"] = 0.1
     body = json.dumps(query).encode()
@@ -170,14 +171,85 @@ def tts_voicevox(text, speaker_id, out_wav, base=VOICEVOX_URL):
         out_wav.write_bytes(r.read())
 
 
-def tts_openjtalk(text, cfg, out_wav):
+def tts_openjtalk(text, cfg, out_wav, speed=1.0):
     txt = out_wav.with_suffix(".txt")
     txt.write_text(text, encoding="utf-8")
     subprocess.run(
         ["open_jtalk", "-x", OJT_DIC, "-m", OJT_VOICE,
-         "-fm", str(cfg["fm"]), "-r", str(cfg["rate"]), "-s", "48000",
+         "-fm", str(cfg["fm"]), "-r", str(cfg["rate"] * speed), "-s", "48000",
          "-ow", str(out_wav), str(txt)],
         check=True, capture_output=True)
+
+
+# ---------------------------------------------------------------------------
+# 効果音(素材を使わず、その場で合成する。権利の確認が要らない)
+#   scene["sfx"] / line["sfx"] に名前を書くと、その頭で鳴る
+# ---------------------------------------------------------------------------
+SFX_GAIN = 0.32
+
+
+def _env(n, attack=0.005, decay=0.25, rate=48000):
+    """立ち上がり→指数減衰 の簡単なエンベロープ."""
+    t = np.arange(n) / rate
+    a = np.minimum(1.0, t / max(attack, 1e-4))
+    return a * np.exp(-t / decay)
+
+
+def make_sfx(name, rate):
+    t = lambda d: np.arange(int(d * rate)) / rate
+    if name == "ding":            # 答えが出るときの「ピン」
+        x = t(0.5)
+        s_ = 0.6 * np.sin(2 * np.pi * 1320 * x) + 0.4 * np.sin(2 * np.pi * 1980 * x)
+        return s_ * _env(len(x), 0.003, 0.18, rate)
+    if name == "tada":            # 1位・結論の「ジャーン」
+        out = np.zeros(int(0.9 * rate))
+        for i, f in enumerate((523.3, 659.3, 784.0, 1046.5)):
+            x = t(0.7)
+            seg = (np.sin(2 * np.pi * f * x) + 0.3 * np.sin(2 * np.pi * f * 2 * x)) * _env(len(x), 0.01, 0.35, rate)
+            st = int(i * 0.09 * rate)
+            seg = seg[: len(out) - st]
+            out[st:st + len(seg)] += seg
+        return out * 0.5
+    if name == "drum":            # 答えの前の「ドロロロ」
+        n = int(1.0 * rate)
+        noise = np.random.default_rng(7).standard_normal(n)
+        # 低めにこもらせる(移動平均)
+        k = 24
+        noise = np.convolve(noise, np.ones(k) / k, mode="same")
+        gate = (np.sin(2 * np.pi * 16 * np.arange(n) / rate) > 0.2).astype(float)
+        fade = np.minimum(1.0, np.arange(n) / (0.15 * rate)) * np.minimum(1.0, (n - np.arange(n)) / (0.05 * rate))
+        return noise * gate * fade * 1.6
+    if name == "boing":           # 外れ・ずっこけの「ボヨン」
+        x = t(0.45)
+        f = 520 * np.exp(-x * 4.5) + 140
+        ph = 2 * np.pi * np.cumsum(f) / rate
+        return np.sin(ph) * _env(len(x), 0.004, 0.22, rate)
+    if name == "pop":             # 画面切り替えの小さな「ポッ」
+        x = t(0.08)
+        return np.sin(2 * np.pi * 900 * x) * _env(len(x), 0.002, 0.03, rate)
+    if name == "swoosh":          # 集中線・登場の「シュッ」
+        n = int(0.3 * rate)
+        noise = np.random.default_rng(3).standard_normal(n)
+        noise = np.convolve(noise, np.ones(6) / 6, mode="same")
+        env = np.sin(np.pi * np.arange(n) / n) ** 2
+        return noise * env * 0.9
+    raise KeyError(f"効果音 {name!r} はありません")
+
+
+def mix_sfx(track, events, rate):
+    """ナレーション(float32, -1..1)に効果音を重ねる. events = [(秒, 名前), ...]."""
+    out = track.copy()
+    cache = {}
+    for sec, name in events:
+        if name not in cache:
+            cache[name] = make_sfx(name, rate).astype(np.float32)
+        sfx = cache[name]
+        st = int(sec * rate)
+        if st >= len(out):
+            continue
+        seg = sfx[: len(out) - st]
+        out[st:st + len(seg)] += seg * SFX_GAIN
+    return np.clip(out, -1.0, 1.0)
 
 
 def read_wav(path):
@@ -244,8 +316,14 @@ def outlined_text(d, xy, text, fnt, fill, outline=WHITE, width=4, anchor=None):
     d.text((x, y), text, font=fnt, fill=fill, anchor=anchor)
 
 
-def draw_character(key, mouth, blink, dim):
-    """2頭身のオリジナル簡易キャラを RGBA で返す(VOICEVOXの立ち絵ではない)."""
+FACES = ("normal", "surprise", "smug", "sad")
+
+
+def draw_character(key, mouth, blink, dim, face="normal"):
+    """2頭身のオリジナル簡易キャラを RGBA で返す(VOICEVOXの立ち絵ではない).
+
+    face: normal / surprise(驚き) / smug(ニヤリ) / sad(困り・呆れ)
+    """
     cw, ch = 300, 300
     img = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
@@ -285,9 +363,29 @@ def draw_character(key, mouth, blink, dim):
         d.rectangle([cx - 78, 106, cx + 78, 124], fill=hair)
     else:                   # 斜め分け
         d.ellipse([cx - 90, 62, cx - 10, 132], fill=hair, outline=INK, width=6)
-    # 目
-    for ex in (cx - 36, cx + 36):
-        if blink:
+    # 目(表情で描き分ける)
+    for side, ex in ((-1, cx - 36), (1, cx + 36)):
+        if face == "surprise":
+            # 目を見開く + 眉を上げる
+            d.ellipse([ex - 22, 104, ex + 22, 156], fill=WHITE, outline=INK, width=5)
+            d.ellipse([ex - 11, 116, ex + 11, 144], fill=INK)
+            d.ellipse([ex - 5, 120, ex + 3, 130], fill=WHITE)
+            d.arc([ex - 22, 84, ex + 22, 108], 200, 340, fill=INK, width=6)
+        elif face == "smug":
+            # 半目 + 片眉
+            d.ellipse([ex - 18, 112, ex + 18, 152], fill=INK)
+            d.ellipse([ex - 8, 120, ex + 4, 134], fill=WHITE)
+            d.rectangle([ex - 22, 104, ex + 22, 128], fill=skin)
+            d.line([(ex - 20, 128), (ex + 20, 128)], fill=INK, width=6)
+            if side == 1:
+                d.line([(ex - 20, 100), (ex + 20, 92)], fill=INK, width=6)
+        elif face == "sad":
+            # 困り眉(内側が下がる) + 少し小さい目
+            d.ellipse([ex - 15, 118, ex + 15, 152], fill=INK)
+            d.ellipse([ex - 7, 124, ex + 3, 136], fill=WHITE)
+            d.line([(ex - 20 * side, 100), (ex + 20 * side, 108)] if side == 1
+                   else [(ex + 20, 100), (ex - 20, 108)], fill=INK, width=6)
+        elif blink:
             d.arc([ex - 18, 122, ex + 18, 152], 200, 340, fill=INK, width=6)
         else:
             d.ellipse([ex - 18, 112, ex + 18, 152], fill=INK)
@@ -301,12 +399,24 @@ def draw_character(key, mouth, blink, dim):
     # 頬
     d.ellipse([cx - 74, 150, cx - 46, 170], fill=(255, 168, 180))
     d.ellipse([cx + 46, 150, cx + 74, 170], fill=(255, 168, 180))
-    # 口(mouth: 0=閉じ 〜 1=大きく開く)
-    if mouth < 0.18:
+    # 口(mouth: 0=閉じ 〜 1=大きく開く)。表情で形を変える
+    if face == "surprise":
+        oh = int(22 + mouth * 14)
+        d.ellipse([cx - 14, 166, cx + 14, 166 + oh], fill=(150, 66, 84), outline=INK, width=4)
+    elif face == "smug" and mouth < 0.18:
+        d.arc([cx - 18, 160, cx + 22, 186], 15, 150, fill=INK, width=5)     # 片側だけ上がる
+    elif face == "sad" and mouth < 0.18:
+        d.line([(cx - 12, 178), (cx - 4, 172), (cx + 4, 178), (cx + 12, 172)], fill=INK, width=5)
+    elif mouth < 0.18:
         d.arc([cx - 16, 166, cx + 16, 186], 20, 160, fill=INK, width=5)
     else:
         oh = int(8 + mouth * 26)
         d.ellipse([cx - 16, 168, cx + 16, 168 + oh], fill=(150, 66, 84), outline=INK, width=4)
+    # 驚きのときは頭の横に「!」
+    if face == "surprise" and not dim:
+        bx = cx + 92
+        d.rounded_rectangle([bx - 7, 44, bx + 7, 92], radius=6, fill=PINK, outline=INK, width=3)
+        d.ellipse([bx - 8, 100, bx + 8, 116], fill=PINK, outline=INK, width=3)
     return img
 
 
@@ -316,7 +426,8 @@ def build_char_cache():
         for dim in (False, True):
             for blink in (False, True):
                 for m in range(4):   # 口の開き 4段階
-                    cache[(key, dim, blink, m)] = draw_character(key, m / 3.0, blink, dim)
+                    for face in FACES:
+                        cache[(key, dim, blink, m, face)] = draw_character(key, m / 3.0, blink, dim, face)
     return cache
 
 
@@ -383,6 +494,8 @@ def scene_background(scene):
         d.text((640, 140), vis["label"], font=font(FONT_BOLD, 32), fill=(120, 118, 130), anchor="ma")
     elif vis["type"] == "bars":
         d.text((92, 128), vis["title"], font=font(FONT_BOLD, 40), fill=INK)
+    elif vis["type"] in ("guess", "pipeline"):
+        pass                                   # 全部 draw_visual_anim 側で描く
     elif vis["type"] == "rank":
         # 順位バッジ
         d.rounded_rectangle([92, 138, 252, 298], radius=34, fill=YELLOW, outline=INK, width=6)
@@ -427,6 +540,74 @@ def draw_visual_anim(img, scene, t):
         x = 640 - (tw + uw + 14) / 2
         outlined_text(d, (x, 186), shown, f, PINK, INK, 5)
         outlined_text(d, (x + tw + 14, 268), vis["unit"], uf, INK, WHITE, 3)
+    elif vis["type"] == "guess":
+        # 「何冊だと思う?」→ ? が脈打つ → 答えの瞬間にカウントアップ
+        reveal = scene.get("_reveal_t", 1.5)
+        if t < reveal:
+            d.text((640, 140), vis.get("question", "いくつだと思いますか?"),
+                   font=font(FONT_BOLD, 34), fill=(120, 118, 130), anchor="ma")
+            size = int(150 + 12 * math.sin(t * 6.0))
+            f = font(FONT_BOLD, size)
+            # 数字が出る位置(y=186〜336)と同じ高さに置く。脈打っても中心がずれないよう補正
+            outlined_text(d, (640, 160 - (size - 150) // 2), "?", f, PURPLE, INK, 6, anchor="ma")
+        else:
+            q = min(1.0, (t - reveal) / 0.9)
+            q = 1 - (1 - q) ** 3
+            d.text((640, 140), vis.get("label", ""), font=font(FONT_BOLD, 32),
+                   fill=(120, 118, 130), anchor="ma")
+            try:
+                target = int(vis["num"])
+                shown = str(int(round(target * q)))
+            except ValueError:
+                shown = vis["num"]
+            # 出た瞬間だけ大きめに出して、等倍に落ち着く
+            pop = 1.0 + 0.18 * max(0.0, 1 - (t - reveal) / 0.22)
+            f = font(FONT_BOLD, int(150 * pop))
+            uf = font(FONT_BOLD, 60)
+            tw = d.textlength(shown, font=f)
+            uw = d.textlength(vis.get("unit", ""), font=uf)
+            x = 640 - (tw + uw + 14) / 2
+            outlined_text(d, (x, 186 - int(75 * (pop - 1))), shown, f, PINK, INK, 5)
+            outlined_text(d, (x + tw + 14, 268), vis.get("unit", ""), uf, INK, WHITE, 3)
+    elif vis["type"] == "pipeline":
+        # 本 → 目次 → 主張 → 数える。シーンの時間を4等分して順に点灯する
+        steps = vis.get("steps", ["本を集める", "目次を取る", "主張を抜く", "冊数を数える"])
+        total = max(scene.get("_dur", 8.0), 0.1)
+        lit = min(len(steps), int(t / (total / len(steps)) ) + 1)
+        n = len(steps)
+        bw, gap, y0, y1 = 220, 46, 150, 330
+        x0 = 640 - (n * bw + (n - 1) * gap) // 2
+        cols = [PINK, SKY, PURPLE, MINT]
+        for i, name in enumerate(steps):
+            x = x0 + i * (bw + gap)
+            on = i < lit
+            col = cols[i % len(cols)] if on else (232, 228, 220)
+            d.rounded_rectangle([x, y0, x + bw, y1], radius=24, fill=col,
+                                outline=INK if on else (190, 186, 178), width=5)
+            cx_, cy_ = x + bw // 2, y0 + 72
+            ink = INK if on else (190, 186, 178)
+            if i == 0:      # 本
+                d.rounded_rectangle([cx_ - 34, cy_ - 40, cx_ + 34, cy_ + 40], radius=6, fill=WHITE, outline=ink, width=4)
+                d.line([(cx_ - 20, cy_ - 40), (cx_ - 20, cy_ + 40)], fill=ink, width=4)
+            elif i == 1:    # 目次
+                d.rounded_rectangle([cx_ - 36, cy_ - 42, cx_ + 36, cy_ + 42], radius=6, fill=WHITE, outline=ink, width=4)
+                for k in range(4):
+                    d.line([(cx_ - 24, cy_ - 26 + k * 18), (cx_ + 24, cy_ - 26 + k * 18)], fill=ink, width=4)
+            elif i == 2:    # 主張(吹き出し)
+                d.rounded_rectangle([cx_ - 40, cy_ - 34, cx_ + 40, cy_ + 22], radius=16, fill=WHITE, outline=ink, width=4)
+                d.polygon([(cx_ - 10, cy_ + 20), (cx_ + 10, cy_ + 20), (cx_ - 6, cy_ + 40)], fill=WHITE, outline=ink)
+                d.line([(cx_ - 22, cy_ - 12), (cx_ + 22, cy_ - 12)], fill=ink, width=4)
+                d.line([(cx_ - 22, cy_ + 2), (cx_ + 8, cy_ + 2)], fill=ink, width=4)
+            else:           # 数える(棒)
+                for k, h in enumerate((30, 58, 44)):
+                    bx_ = cx_ - 36 + k * 28
+                    d.rectangle([bx_, cy_ + 36 - h, bx_ + 20, cy_ + 36], fill=WHITE, outline=ink, width=4)
+            f = font(FONT_BOLD, 24)
+            d.text((cx_, y1 - 46), name, font=f, fill=WHITE if on else (170, 166, 158), anchor="ma")
+            if i < n - 1:
+                ax = x + bw + gap // 2
+                d.polygon([(ax - 14, 232), (ax + 10, 240), (ax - 14, 248)],
+                          fill=INK if i + 1 < lit else (200, 196, 188))
     elif vis["type"] == "bars":
         # 本数に応じて行間を詰め、カード内(186..352)に必ず収める
         items = vis["items"]
@@ -511,35 +692,60 @@ def render_bubble(text, speaker):
 def synthesize(scenes, audio_dir, engine, narration, quiet=False,
                line_pause=None, scene_pause=None):
     """台本を読み上げてwavにまとめ、(タイムライン, チャプター, 合計秒)を返す."""
-    timeline, chapters, all_audio = [], [], []
+    timeline, chapters, all_audio, sfx_events = [], [], [], []
     elapsed, rate = 0.0, None
     for si, scene in enumerate(scenes):
         if "chapter" in scene:
             chapters.append((elapsed, scene["chapter"]))
+        if scene.get("sfx"):
+            sfx_events.append((elapsed, scene["sfx"]))
+        scene_start = elapsed
+        line_starts = []
         for li, line in enumerate(scene["lines"]):
             wav = audio_dir / f"l{len(timeline):03d}.wav"
             spec = SPEAKERS[line["sp"]]
             text = line.get("tts", line["text"])
+            speed = float(line.get("speed", 1.0))
             if engine == "voicevox":
-                tts_voicevox(text, spec["voicevox"], wav)
+                tts_voicevox(text, spec["voicevox"], wav, speed=speed)
             else:
-                tts_openjtalk(text, spec["ojt"], wav)
+                tts_openjtalk(text, spec["ojt"], wav, speed=speed)
             samples, rate = read_wav(wav)
+            # 溜め(答えの前など)。音声の前に無音を足すので、口パクもその分ずれる
+            before = float(line.get("pause_before", 0.0))
+            if before > 0:
+                samples = np.concatenate([np.zeros(int(before * rate), dtype=np.float32), samples])
+            if line.get("sfx"):
+                sfx_events.append((elapsed, line["sfx"]))
             lp = LINE_PAUSE if line_pause is None else line_pause
             sp_ = SCENE_PAUSE if scene_pause is None else scene_pause
             pause = sp_ if li == len(scene["lines"]) - 1 else lp
             dur = len(samples) / rate + pause
+            line_starts.append(elapsed - scene_start)
             timeline.append({"scene": si, "line": line, "dur": dur,
+                             "scene_t": elapsed - scene_start,
                              "env": mouth_envelope(samples, rate, dur, FPS)})
             elapsed += dur
             all_audio.append(samples)
             all_audio.append(np.zeros(int(pause * rate), dtype=np.float32))
+        # シーン内の時刻が必要な演出(予想→答え / 手順アニメ)のために記録しておく
+        scene["_dur"] = elapsed - scene_start
+        vis = scene.get("visual", {})
+        if vis.get("type") == "guess":
+            rl = int(vis.get("reveal_line", 1))
+            rl = max(0, min(rl, len(line_starts) - 1))
+            scene["_reveal_t"] = line_starts[rl] + float(scene["lines"][rl].get("pause_before", 0.0))
+            # 答えが出る瞬間に自動で「ピン」
+            sfx_events.append((scene_start + scene["_reveal_t"], vis.get("reveal_sfx", "ding")))
         if not quiet:
             print(f"  tts scene {si + 1}/{len(scenes)}")
 
     merged = np.concatenate(all_audio)
     peak = np.abs(merged).max() or 1.0
-    merged = (merged / peak * 0.89 * 32767).astype(np.int16)
+    merged = merged / peak * 0.89
+    if sfx_events:
+        merged = mix_sfx(merged, sfx_events, rate)
+    merged = (merged * 32767).astype(np.int16)
     with wave.open(str(narration), "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
@@ -551,15 +757,22 @@ def synthesize(scenes, audio_dir, engine, narration, quiet=False,
 def compose_frame(scene, item, fi, t, scene_t, chars, bg_cache, bubble, bub_h):
     """横型(1280x720)のフレームを1枚組み立てる."""
     speaker = item["line"]["sp"]
+    line = item["line"]
     frame = bg_cache.copy()
     draw_visual_anim(frame, scene, scene_t + t)
     # キャラ(話者は揺れ+口パク、聞き手はトーンダウン)
+    #   line["face"]  = 話し手の表情 / line["react"] = 聞き手の表情
     for key in SPEAKERS:
         talking = key == speaker
+        face = line.get("face", "normal") if talking else line.get("react", "normal")
+        if face not in FACES:
+            face = "normal"
         m = int(round(item["env"][min(fi, len(item["env"]) - 1)] * 3)) if talking else 0
-        blink = (int((scene_t + t) * 1000) % 3400) < 130
+        blink = face == "normal" and (int((scene_t + t) * 1000) % 3400) < 130
         bob = int(math.sin((scene_t + t) * 7.5) * 5) if talking else 0
-        sprite = chars[(key, not talking, blink, m)]
+        if face == "surprise":
+            bob -= int(6 * max(0.0, 1 - t / 0.25))          # 驚いた瞬間だけ跳ねる
+        sprite = chars[(key, not talking, blink, m, face)]
         frame.paste(sprite, (CHAR_X[SPEAKERS[key]["side"]], CHAR_Y + bob), sprite)
     # 吹き出し(登場時にポップイン)
     pop = min(1.0, t / 0.16)
@@ -575,6 +788,12 @@ def compose_frame(scene, item, fi, t, scene_t, chars, bg_cache, bubble, bub_h):
     else:
         b = bubble
     frame.paste(b, (bx, by), b)
+    # 集中線のシーンは、入った瞬間だけ画面を揺らす
+    if scene.get("impact") and scene_t + t < 0.28:
+        k = 1 - (scene_t + t) / 0.28
+        dx = int(math.sin((scene_t + t) * 90) * 7 * k)
+        dy = int(math.cos((scene_t + t) * 70) * 5 * k)
+        frame = ImageChops.offset(frame, dx, dy)
     return frame
 
 
@@ -684,7 +903,7 @@ def shorts_opening_card(short):
 
     # 下にキャラを置いて、チャンネルの顔を一瞬で見せる
     for key, x in (("noa", 110), ("mei", 600)):
-        sp = draw_character(key, 0.7, False, False).resize((370, 370), Image.LANCZOS)
+        sp = draw_character(key, 0.7, False, False, "normal").resize((370, 370), Image.LANCZOS)
         img.paste(sp, (x, 1360), sp)
     d.text((SHORT_W // 2, 1760), CHANNEL, font=font(FONT_BOLD, 44),
            fill=(150, 142, 128), anchor="ma")

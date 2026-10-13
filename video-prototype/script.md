@@ -240,7 +240,39 @@ python3 build_video.py ./build --shorts
 - タイトルの末尾に `#Shorts` を付ける
 - 本編と同じくAI・合成コンテンツの開示をONにする
 
+## 演出キー(第6回から。ep*.py の SCENES / lines に書く)
+
+淡々と数字を読むだけだと「面白い瞬間」が生まれないので、予想→答え・表情・音・間を足した。
+すべて任意。書かなければ従来どおり。
+
+| 場所 | キー | 値 | 効果 |
+|---|---|---|---|
+| scene | `sfx` | `drum` / `ding` / `tada` / `boing` / `pop` / `swoosh` | シーンの頭で鳴る。numpyで合成するので素材不要 |
+| scene | `impact` | `True` | 集中線 + 入った瞬間に画面が揺れる |
+| line | `sfx` | 同上 | そのセリフの頭で鳴る |
+| line | `pause_before` | 秒 | セリフの前の溜め(ドラムロール中に使う) |
+| line | `speed` | 倍率 | 前置きは 1.05、答えは 0.92 くらい |
+| line | `face` | `normal` / `surprise` / `smug` / `sad` | 話し手の表情 |
+| line | `react` | 同上 | **聞き手**の表情(答えを聞いた瞬間の驚き、など) |
+| visual | `type: "guess"` | `question` / `num` / `unit` / `label` / `reveal_line` | 「?」が脈打ち、`reveal_line` 番目のセリフで答えがポンと出る。出た瞬間に `ding` が自動で鳴る |
+| visual | `type: "pipeline"` | `steps`(4つ) | 本→目次→主張→数える の手順アニメ。シーンの時間を4等分して順に点灯 |
+
+### 「予想→答え」の型
+
+```python
+{"visual": {"type": "guess", "kicker": "…何ポイント上がった?", "question": "あなたは何ポイントだと思いますか?",
+            "num": "2", "unit": "ポイント", "label": "48条件中、たった1条件ぶん", "reveal_line": 3},
+ "lines": [
+   {"sp": "mei", "text": "何ポイント上がったと思う?"},
+   {"sp": "noa", "text": "20ポイントくらい?", "face": "smug"},            # 外れる予想を言わせる
+   {"sp": "mei", "text": "答えは", "sfx": "drum", "pause_before": 0.3},   # ドラムロール
+   {"sp": "mei", "text": "2ポイント", "pause_before": 1.1, "speed": 0.92, "react": "surprise"},  # ← reveal_line
+   {"sp": "noa", "text": "2!?", "face": "surprise"},
+ ]}
+```
+
+**視聴者にも予想させる**のがポイント(「見ている人も3秒考えて」)。予想と答えのズレが「面白い」の正体。
+
 ## 未実装
 
-- 効果音・BGM ※フリー音源の規約確認を忘れずに
-- キャラの表情差分(驚き・呆れ)
+- BGM ※フリー音源の規約確認を忘れずに(効果音は合成済み)
