@@ -233,6 +233,21 @@ python3 experiment.py --score     # 採点して experiment_report.md を出す
 
 ---
 
+### 役割(「あなたは◯◯です」)を試すとき
+
+役割は形ではなく中身を変える技なので、`experiment.py` の「形の条件」では測れない。
+`experiment_role.py` は **役割を与えたら、出力がその役割らしい方向に動くか** を数える
+(漢字の割合・指摘の数・数字が入った行の数など)。
+
+```bash
+python3 experiment_role.py --init     # A(役割なし)/ B(役割あり)を3回ずつ = 6個
+python3 experiment_role.py --score    # experiment_role_report.md を出す
+```
+
+3回とも予想の方向に動いたら「効いた」、半分以上で「傾向あり」、それ以下は「効いていない」。
+
+---
+
 ## 集計の途中で「この本は対象外だった」と気づいたら
 
 idは**絶対に振り直さない**こと。`responses/` の答えはidで対応しているので、
