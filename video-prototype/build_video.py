@@ -224,6 +224,22 @@ def make_sfx(name, rate):
         f = 520 * np.exp(-x * 4.5) + 140
         ph = 2 * np.pi * np.cumsum(f) / rate
         return np.sin(ph) * _env(len(x), 0.004, 0.22, rate)
+    if name == "jingle":          # オープニングの「ピロリロリン♪」
+        out = np.zeros(int(1.6 * rate))
+        notes = (523.3, 659.3, 784.0, 1046.5, 1318.5)
+        for i, f in enumerate(notes):
+            x = t(0.9)
+            tone = (np.sin(2 * np.pi * f * x) + 0.35 * np.sin(2 * np.pi * f * 3 * x))
+            seg = tone * _env(len(x), 0.004, 0.22 if i < 4 else 0.5, rate)
+            st = int(i * 0.075 * rate)
+            seg = seg[: len(out) - st]
+            out[st:st + len(seg)] += seg
+        # 最後にキラッとした高音を重ねる
+        x = t(0.6)
+        sparkle = np.sin(2 * np.pi * 2637 * x) * _env(len(x), 0.002, 0.15, rate) * 0.5
+        st = int(0.38 * rate)
+        out[st:st + len(sparkle)] += sparkle[: len(out) - st]
+        return out * 0.45
     if name == "pop":             # 画面切り替えの小さな「ポッ」
         x = t(0.08)
         return np.sin(2 * np.pi * 900 * x) * _env(len(x), 0.002, 0.03, rate)
@@ -496,6 +512,33 @@ def scene_background(scene):
         d.text((92, 128), vis["title"], font=font(FONT_BOLD, 40), fill=INK)
     elif vis["type"] in ("guess", "pipeline"):
         pass                                   # 全部 draw_visual_anim 側で描く
+    elif vis["type"] == "prompt_compare":
+        # 左右に「お願い文」を並べる。右だけ見本付き(見本部分は anim 側で蛍光ペン)
+        body = vis.get("request", [])
+        boxes = ((84, vis.get("left_label", "見本なし"), False),
+                 (668, vis.get("right_label", "見本あり"), True))
+        f_body = font(FONT_REG, 22)
+        f_pill = font(FONT_BOLD, 22)
+        for x0, label, with_ex in boxes:
+            d.rounded_rectangle([x0, 122, x0 + 528, 358], radius=18,
+                                fill=(246, 247, 252), outline=(200, 204, 220), width=3)
+            pw = d.textlength(label, font=f_pill)
+            col = PINK if with_ex else (150, 154, 170)
+            d.rounded_rectangle([x0 + 16, 108, x0 + 16 + pw + 28, 140], radius=14,
+                                fill=col, outline=INK, width=3)
+            d.text((x0 + 30, 111), label, font=f_pill, fill=WHITE)
+            y = 156
+            for ln in body:
+                d.text((x0 + 22, y), ln, font=f_body, fill=INK)
+                y += 30
+            if with_ex:
+                y += 6
+                d.text((x0 + 22, y), vis.get("example_head", "▼こんな感じで(見本)"),
+                       font=font(FONT_BOLD, 21), fill=(190, 70, 100))
+                y += 28
+                for ln in vis.get("example", []):
+                    d.text((x0 + 22, y), ln, font=f_body, fill=INK)
+                    y += 28
     elif vis["type"] == "rank":
         # 順位バッジ
         d.rounded_rectangle([92, 138, 252, 298], radius=34, fill=YELLOW, outline=INK, width=6)
@@ -569,6 +612,35 @@ def draw_visual_anim(img, scene, t):
             x = 640 - (tw + uw + 14) / 2
             outlined_text(d, (x, 186 - int(75 * (pop - 1))), shown, f, PINK, INK, 5)
             outlined_text(d, (x + tw + 14, 268), vis.get("unit", ""), uf, INK, WHITE, 3)
+    elif vis["type"] == "prompt_compare":
+        # 見本の部分に、蛍光ペンを左から右へ引く(文字の下に敷くので、文字はあとで重ねる)
+        body = vis.get("request", [])
+        ex = vis.get("example", [])
+        x0 = 668
+        y_head = 156 + 30 * len(body) + 6
+        y_end = y_head + 28 + 28 * len(ex) + 2
+        q = min(1.0, max(0.0, (t - 0.8) / 0.6))
+        if q > 0:
+            w = int(490 * (1 - (1 - q) ** 3))
+            hl = Image.new("RGBA", (w, y_end - y_head + 4), (255, 226, 92, 150))
+            img.paste(hl, (x0 + 16, y_head - 2), hl)
+            # 蛍光ペンの上から文字をもう一度書く(下敷きで薄くならないように)
+            d.text((x0 + 22, y_head), vis.get("example_head", "▼こんな感じで(見本)"),
+                   font=font(FONT_BOLD, 21), fill=(190, 70, 100))
+            y = y_head + 28
+            for ln in ex:
+                d.text((x0 + 22, y), ln, font=font(FONT_REG, 22), fill=INK)
+                y += 28
+        # 「ここが見本」の矢印ラベル
+        if q >= 1.0:
+            lab = "← ここが「見本」"
+            f = font(FONT_BOLD, 24)
+            lw = d.textlength(lab, font=f)
+            lx = 1196 - lw - 18
+            ly = y_head + 2
+            d.rounded_rectangle([lx - 12, ly - 4, lx + lw + 12, ly + 32], radius=12,
+                                fill=PINK, outline=INK, width=3)
+            d.text((lx, ly), lab, font=f, fill=WHITE)
     elif vis["type"] == "pipeline":
         # 本 → 目次 → 主張 → 数える。シーンの時間を4等分して順に点灯する
         steps = vis.get("steps", ["本を集める", "目次を取る", "主張を抜く", "冊数を数える"])
@@ -816,20 +888,100 @@ def open_encoder(size, narration, mp4):
 # ---------------------------------------------------------------------------
 # 本体
 # ---------------------------------------------------------------------------
+TAGLINE = "本を数えて、確かめる。"
+
+
+def op_layers(scene):
+    """オープニングの部品を1回だけ作る(フレームごとに作ると遅い)."""
+    op = scene["op"]
+    bg = Image.new("RGB", (W, H), CREAM)
+    d = ImageDraw.Draw(bg)
+    for y in range(0, H, 40):
+        for x in range(0, W, 40):
+            d.ellipse([x, y, x + 6, y + 6], fill=(240, 232, 214))
+    draw_burst(d, W // 2, 250, n=32, r0=150, r1=1200, color=(255, 226, 168))
+
+    # タイトル(拡大縮小するので RGBA で別に持つ)
+    f = font(FONT_BOLD, 112)
+    tmp = ImageDraw.Draw(Image.new("RGB", (10, 10)))
+    tw = int(tmp.textlength(CHANNEL, font=f)) + 40
+    title = Image.new("RGBA", (tw, 170), (0, 0, 0, 0))
+    outlined_text(ImageDraw.Draw(title), (20, 10), CHANNEL, f, INK, WHITE, 10)
+
+    sprites = {
+        "noa": draw_character("noa", 0.7, False, False, "normal").resize((330, 330), Image.LANCZOS),
+        "mei": draw_character("mei", 0.7, False, False, "smug").resize((330, 330), Image.LANCZOS),
+    }
+    return {"bg": bg, "title": title, "sprites": sprites,
+            "ep_title": op.get("title", ""), "number": NUMBER}
+
+
+def op_frame(layers, t):
+    """オープニング1フレーム. t はシーン頭からの秒."""
+    ease = lambda x: 1 - (1 - max(0.0, min(1.0, x))) ** 3
+    img = layers["bg"].copy()
+    d = ImageDraw.Draw(img)
+
+    # キャラが左右から滑り込んで、着地したら小さく弾む
+    k = ease(t / 0.35)
+    bounce = int(abs(math.sin(max(0.0, t - 0.35) * 7.0)) * 10 * max(0.0, 1 - (t - 0.35) / 1.2)) if t > 0.35 else 0
+    for key, x_end, x_start in (("noa", 30, -360), ("mei", W - 360, W + 30)):
+        x = int(x_start + (x_end - x_start) * k)
+        sp = layers["sprites"][key]
+        img.paste(sp, (x, 400 - bounce), sp)
+
+    # チャンネル名が大きく出て、等倍に落ち着く
+    if t >= 0.12:
+        q = ease((t - 0.12) / 0.3)
+        scale = 1.45 - 0.45 * q
+        title = layers["title"]
+        tw, th = int(title.width * scale), int(title.height * scale)
+        ti = title.resize((tw, th), Image.BILINEAR)
+        img.paste(ti, (W // 2 - tw // 2, 190 - th // 2), ti)
+
+    # キャッチコピー
+    if t >= 0.45:
+        f = font(FONT_BOLD, 40)
+        outlined_text(d, (W // 2, 292), TAGLINE, f, PINK, WHITE, 5, anchor="ma")
+
+    # 回の番号とタイトル
+    if t >= 0.7 and layers["ep_title"]:
+        txt = f"#{layers['number']}  {layers['ep_title']}"
+        f = font(FONT_BOLD, 34)
+        tw = d.textlength(txt, font=f)
+        x0 = W // 2 - tw / 2 - 28
+        d.rounded_rectangle([x0, 600, x0 + tw + 56, 662], radius=30,
+                            fill=INK, outline=WHITE, width=4)
+        d.text((W // 2, 610), txt, font=f, fill=WHITE, anchor="ma")
+    return img
+
+
 def render_video(scenes, timeline, chars, narration, mp4, vertical=None, opening=None):
     """タイムラインどおりに動画を書き出す。vertical を渡すと縦型で包む."""
     size = (SHORT_W, SHORT_H) if vertical else (W, H)
     proc = open_encoder(size, narration, mp4)
     pop = pop_in_frames(opening) if opening is not None else []
     bg_cache, cur_scene, scene_t = None, -1, 0.0
+    op_cache = None
     for item in timeline:
         scene = scenes[item["scene"]]
         hero = bool(vertical and scene.get("_opening"))
+        is_op = bool(scene.get("op"))
         if item["scene"] != cur_scene:
             cur_scene = item["scene"]
-            bg_cache = None if hero else scene_background(scene)
+            bg_cache = None if (hero or is_op) else scene_background(scene)
+            if is_op and op_cache is None:
+                op_cache = op_layers(scene)
             scene_t = 0.0
         n_frames = max(1, int(round(item["dur"] * FPS)))
+        if is_op:
+            for fi in range(n_frames):
+                frame = op_frame(op_cache, scene_t + fi / FPS)
+                if vertical:
+                    frame = wrap_vertical(frame, vertical)
+                proc.stdin.write(frame.tobytes())
+            scene_t += item["dur"]
+            continue
         if hero:
             # 最初の数フレームだけ拡大して出す(静止画の出だしは動きが無いと切られる)
             for fi in range(n_frames):

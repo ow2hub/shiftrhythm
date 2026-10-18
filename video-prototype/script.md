@@ -256,6 +256,21 @@ python3 build_video.py ./build --shorts
 | line | `react` | 同上 | **聞き手**の表情(答えを聞いた瞬間の驚き、など) |
 | visual | `type: "guess"` | `question` / `num` / `unit` / `label` / `reveal_line` | 「?」が脈打ち、`reveal_line` 番目のセリフで答えがポンと出る。出た瞬間に `ding` が自動で鳴る |
 | visual | `type: "pipeline"` | `steps`(4つ) | 本→目次→主張→数える の手順アニメ。シーンの時間を4等分して順に点灯 |
+| visual | `type: "prompt_compare"` | `request`(2行) / `example`(3行) | お願い文を左右に並べ、右の「見本」部分に蛍光ペンが引かれる。**専門用語を出したら、その直後に実物を見せる**ために使う |
+| scene | `op` | `{"title": "回のタイトル"}` | **オープニング**(約3秒)。キャラが左右から入り、チャンネル名がポンと出て、キャッチコピーと回番号。`sfx: "jingle"` と組む |
+
+### オープニングの置き場所
+
+**0秒目に置かない。** フック(視聴者の状況 → 予想 → 答え)で掴んでから入れる。
+冒頭にOPがあると、最初の数秒で「いつもの前置き」と判断されてスワイプされる。
+
+```python
+{"op": {"title": "AI本の1位を、試してみた"}, "sfx": "jingle",
+ "visual": {"type": "op", "kicker": ""},
+ "lines": [{"sp": "noa", "text": "本のデータ研究所!", "pause_before": 0.55, "speed": 1.05}]}
+```
+
+キャッチコピーは `build_video.py` の `TAGLINE`(「本を数えて、確かめる。」)。
 
 ### 「予想→答え」の型
 
