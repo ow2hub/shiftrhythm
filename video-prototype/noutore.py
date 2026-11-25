@@ -2,8 +2,14 @@
 """脳トレショート自動生成 — 1問10〜13秒の縦型動画(1080x1920)をまとめて作る.
 
 使い方(video-prototype フォルダで):
-    python3 noutore.py --sample                       # 4形式を1本ずつ(見本)
+    python3 noutore.py --sample                       # 4形式 × ★★/★★★ の見本
     python3 noutore.py --count 21 --start 2026-12-01  # 1週間分(1日3本: 7時/12時/18時)
+
+むずかしさ(--level で全部そろえることもできる):
+    ★   かんたん  : 4x4に3つ / 1つの県の並べ替え / 同じ県の市から3択 / 「お□□□」
+    ★★  ふつう    : 5x5に4つ / 1文字あまる並べ替え / まぎらわしい県庁所在地の3択 / 答え3〜4つ
+    ★★★ むずかしい: 5x5に4つ(ななめあり) / 2つの県がまざった並べ替え / 市から県を当てる4択 / 答え4〜6つ
+    省略時は 7時・12時=★★、18時=★★★
 
 比較テスト用のオプション:
     --voice A|B      声のセット(A=いつもの2人 / B=ゆっくり落ち着いた声)
@@ -57,13 +63,17 @@ HINT_FILL = (255, 228, 120)
 ANSWER_COLORS = [PINK, SKY, MINT, PURPLE, ORANGE, YELLOW]
 
 KINDS = {
-    "grid":    {"label": "漢字かくれんぼ", "color": PINK,   "count": 5},
-    "anagram": {"label": "ならべかえ",     "color": SKY,    "count": 5},
-    "capital": {"label": "県庁所在地",     "color": MINT,   "count": 5},
-    "initial": {"label": "頭文字クイズ",   "color": PURPLE, "count": 6},
+    "grid":    {"label": "漢字かくれんぼ", "color": PINK},
+    "anagram": {"label": "ならべかえ",     "color": SKY},
+    "capital": {"label": "県庁所在地",     "color": MINT},
+    "initial": {"label": "頭文字クイズ",   "color": PURPLE},
 }
+# むずかしさ(★の数)ごとの考える時間(秒)と、ヒントを出すタイミング(考える時間の何割で出すか)
+COUNTS = {"grid": (5, 6, 7), "anagram": (5, 6, 7), "capital": (5, 5, 6), "initial": (6, 7, 7)}
+HINT_AT = (0.5, 0.65, 0.75)
 # 時間帯ごとに形式を固定すると「12時はならべかえ」と習慣になる(伸びている脳トレch の型)
-SLOTS = [("07:00", ["grid"]), ("12:00", ["anagram", "initial"]), ("18:00", ["capital"])]
+# (時刻, 形式, ★の数)。夕方は時間のある人が多いので難しめにする
+SLOTS = [("07:00", ["grid"], 2), ("12:00", ["anagram", "initial"], 2), ("18:00", ["capital"], 3)]
 
 # 声のセット。VOICEVOX のキャラ名とスタイル名で指定する(IDは起動中のVOICEVOXから引く)。
 # 別のキャラに変えるときは、そのキャラの利用規約を確認し、概要欄のクレジットも書き換えること。
@@ -362,18 +372,48 @@ class Voice:
 #   共通: q_lines(画面の問題文) q_tts(読み上げ) ans_tts banner hint_text title key
 #         n_flips(答えを光らせる回数) draw(img, t, T)
 # ---------------------------------------------------------------------------
+NUM_KANA = {2: "ふたつ", 3: "みっつ", 4: "よっつ", 5: "いつつ", 6: "むっつ"}
+
+
+def level_setup(board, kind, level):
+    board.level = level
+    board.count = COUNTS[kind][level - 1]
+    board.hint_at = HINT_AT[level - 1]
+    board.label = KINDS[kind]["label"]
+
+
+def tile_row_size(n):
+    """1行に n 枚並べるときのマスの大きさとすき間."""
+    if n <= 4:
+        return 160, 20
+    if n == 5:
+        return 146, 16
+    if n == 6:
+        return 128, 14
+    if n == 7:
+        return 114, 12
+    return 102, 10
+
+
 class GridBoard:
+    """漢字かくれんぼ. ★=4x4に3つ / ★★=5x5に4つ / ★★★=5x5に4つ(ななめあり)."""
     kind = "grid"
 
-    def __init__(self, rng, avoid):
-        self.grid, self.answers = nd.make_kanji_grid(rng, tricky=True, avoid=avoid)
-        self.size = len(self.grid)
-        self.tile, self.gap = 132, 14
+    def __init__(self, rng, avoid, level=2):
+        level_setup(self, self.kind, level)
+        size, n_ans = (4, 3) if level == 1 else (5, 4)
+        self.diagonal = level == 3
+        self.grid, self.answers = nd.make_kanji_grid(
+            rng, n_answers=n_ans, size=size, tricky=True, avoid=avoid,
+            diagonal=self.diagonal, three=level >= 2)
+        self.size = size
+        self.tile, self.gap = (132, 14) if size == 4 else (108, 10)
         total = self.size * self.tile + (self.size - 1) * self.gap
         self.x0, self.y0 = (W - total) // 2, 548
         self.cell_ans = {cell: i for i, (_, cells) in enumerate(self.answers) for cell in cells}
-        self.normal = {}
-        self.colored = {}
+        self.is_diag = [cells[1][0] - cells[0][0] == 1 and abs(cells[1][1] - cells[0][1]) == 1
+                        for _, cells in self.answers]
+        self.normal, self.colored = {}, {}
         for r, row in enumerate(self.grid):
             for c, ch in enumerate(row):
                 self.normal[(r, c)] = tile_sprite(ch, self.tile, WHITE, INK)
@@ -381,7 +421,7 @@ class GridBoard:
                     col = ANSWER_COLORS[self.cell_ans[(r, c)]]
                     self.colored[(r, c)] = tile_sprite(ch, self.tile, col, WHITE)
         self.halo = halo_sprite(self.tile)
-        hint_pref, hint_cells = self.answers[0]
+        hint_pref, hint_cells = self.answers[0]          # ★★★ では1つ目がななめの答え
         self.hint_cell = hint_cells[0]
         r0, c0 = self.hint_cell
         self.hint_tile = tile_sprite(self.grid[r0][c0], self.tile, HINT_FILL, INK)
@@ -392,20 +432,31 @@ class GridBoard:
                 self.banner_segs.append(("・", INK))
             self.banner_segs.append((nm, ANSWER_COLORS[i]))
         self.key = "grid:" + ",".join(sorted(p.name for p, _ in self.answers))
-        self.q_lines = [[("この中に ", INK), ("都道府県", PINK), ("が", INK)],
-                        [("3つ", PINK), (" かくれているよ！", INK)]]
-        self.q_tts = "この中に、都道府県が、みっつ、かくれているよ！"
+        n = len(self.answers)
+        if self.diagonal:
+            self.q_lines = [[("都道府県が ", INK), (f"{n}つ", PINK), (" かくれてる！", INK)],
+                            [("ななめ", PINK), (" もあるよ", INK)]]
+            self.q_tts = f"都道府県が、{NUM_KANA[n]}、かくれてる！ ななめもあるよ！"
+        else:
+            self.q_lines = [[("この中に ", INK), ("都道府県", PINK), ("が", INK)],
+                            [(f"{n}つ", PINK), (" かくれているよ！", INK)]]
+            self.q_tts = f"この中に、都道府県が、{NUM_KANA[n]}、かくれているよ！"
         self.ans_tts = "、".join(p.reading for p, _ in self.answers) + "！"
         self.banner = "・".join(names)
-        self.hint_text = f"ヒント：「{hint_pref.name[0]}」に注目！"
-        self.n_flips = len(self.answers)
+        self.hint_text = f"ヒント：「{self.grid[r0][c0]}」に注目！"
+        self.n_flips = n
 
     def title(self, k):
-        variants = [
-            f"【漢字かくれんぼ その{k}】16文字に都道府県が3つ！全部わかる？ #脳トレ #クイズ",
-            f"【漢字かくれんぼ その{k}】この中に都道府県が3つ。5秒で見つけたらすごい！ #脳トレ #クイズ",
-        ]
-        return variants[k % len(variants)]
+        n_cells, n = self.size * self.size, len(self.answers)
+        if self.level == 1:
+            variants = [
+                f"【漢字かくれんぼ その{k}】{n_cells}文字に都道府県が{n}つ！全部わかる？ #脳トレ #クイズ",
+                f"【漢字かくれんぼ その{k}】この中に都道府県が{n}つ。5秒で見つけたらすごい！ #脳トレ #クイズ",
+            ]
+            return variants[k % len(variants)]
+        if self.level == 2:
+            return f"【漢字かくれんぼ その{k}】{n_cells}文字に都道府県が{n}つ！全部わかる？ #脳トレ #クイズ"
+        return f"【漢字かくれんぼ・上級 その{k}】{n_cells}文字に都道府県が{n}つ！ななめもあるよ #脳トレ #クイズ"
 
     def center(self, r, c):
         return (self.x0 + c * (self.tile + self.gap) + self.tile / 2,
@@ -414,6 +465,11 @@ class GridBoard:
     def draw(self, img, t, T):
         d = ImageDraw.Draw(img)
         flip_dur = 0.28
+        # ななめの答えは、マスの下に太い線を引いてすき間から見せる
+        for i, (_, cells) in enumerate(self.answers):
+            if self.is_diag[i] and t >= T["flip"][i] + flip_dur:
+                pts = [self.center(r, c) for r, c in cells]
+                d.line(pts, fill=ANSWER_COLORS[i], width=int(self.tile * 0.6))
         for (r, c), spr in self.normal.items():
             cx, cy = self.center(r, c)
             ai = self.cell_ans.get((r, c))
@@ -432,109 +488,241 @@ class GridBoard:
                 paste_center(img, self.halo, cx, cy, alpha=0.5 + 0.5 * pulse)
                 paste_center(img, self.hint_tile, cx, cy, scale=1.04 + 0.06 * pulse)
                 continue
-            # 最初の1秒: タイルが順番にぷるんと動く(画面が止まって見えないように)
-            wv = t - (0.3 + (r + c) * 0.07)
+            # 最初の1秒: マスが順番にぷるんと動く(画面が止まって見えないように)
+            wv = t - (0.3 + (r + c) * 0.06)
             sc = 1 + 0.08 * math.sin(math.pi * wv / 0.3) if 0 < wv < 0.3 else 1.0
             paste_center(img, spr, cx, cy, scale=sc, alpha=alpha)
         for i, (_, cells) in enumerate(self.answers):
-            if t >= T["flip"][i] + flip_dur:
-                (r0, c0), (r1, c1) = cells[0], cells[-1]
-                x0 = self.x0 + c0 * (self.tile + self.gap) - 12
-                y0 = self.y0 + r0 * (self.tile + self.gap) - 12
-                x1 = self.x0 + c1 * (self.tile + self.gap) + self.tile + 12
-                y1 = self.y0 + r1 * (self.tile + self.gap) + self.tile + 12
-                d.rounded_rectangle([x0, y0, x1, y1], radius=40, outline=ANSWER_COLORS[i], width=10)
+            if self.is_diag[i] or t < T["flip"][i] + flip_dur:
+                continue
+            (r0, c0), (r1, c1) = cells[0], cells[-1]
+            pad = 10
+            x0 = self.x0 + c0 * (self.tile + self.gap) - pad
+            y0 = self.y0 + r0 * (self.tile + self.gap) - pad
+            x1 = self.x0 + c1 * (self.tile + self.gap) + self.tile + pad
+            y1 = self.y0 + r1 * (self.tile + self.gap) + self.tile + pad
+            d.rounded_rectangle([x0, y0, x1, y1], radius=int(self.tile * 0.3),
+                                outline=ANSWER_COLORS[i], width=9)
 
 
 class AnagramBoard:
+    """ならべかえ. ★=1つの県 / ★★=1文字あまる / ★★★=2つの県がまざってる."""
     kind = "anagram"
 
-    def __init__(self, rng, avoid):
-        cands = [p for p in nd.anagram_candidates() if f"anagram:{p.name}" not in avoid]
-        self.pref = rng.choice(cands or nd.anagram_candidates())
-        self.perm = nd.make_anagram(rng, self.pref)          # 表示位置 i に reading[perm[i]]
-        rd = self.pref.reading
-        n = len(rd)
-        self.tile, self.gap = (160, 20) if n <= 4 else (146, 16)
-        total = n * self.tile + (n - 1) * self.gap
-        self.x0, self.y = (W - total) // 2, 760
-        self.normal = [tile_sprite(ch, self.tile, WHITE, INK, 0.6) for ch in rd]
-        self.colored = [tile_sprite(ch, self.tile, SKY, WHITE, 0.6) for ch in rd]
+    def __init__(self, rng, avoid, level=2):
+        level_setup(self, self.kind, level)
+        self.y = 760
+        self.extra = None
+        if level == 3:
+            self._init_pair(rng, avoid)
+        else:
+            self._init_single(rng, avoid, extra=(level == 2))
+
+    # 1つの県(★ / ★★)
+    def _init_single(self, rng, avoid, extra):
+        cands = [p for p in nd.anagram_candidates()
+                 if f"anagram:{p.name}" not in avoid and (not extra or len(p.reading) >= 4)]
+        cands = cands or [p for p in nd.anagram_candidates() if not extra or len(p.reading) >= 4]
+        rng.shuffle(cands)
+        for pref in cands:
+            rd = pref.reading
+            try:
+                if extra:
+                    letters, ex = nd.make_anagram_extra(rng, pref)
+                else:
+                    perm = nd.make_anagram(rng, pref)
+                    letters, ex = [rd[j] for j in perm], None
+            except RuntimeError:
+                continue
+            break
+        else:
+            raise RuntimeError("並べ替え問題が作れませんでした")
+        self.pref = pref
+        n = len(letters)
+        self.tile, self.gap = tile_row_size(n)
+        # 表示位置 → 正解での位置(あまりの文字は最後のマスへ)
+        used = set()
+        self.tiles = []        # (文字, 表示位置, 着地位置, 色)
+        for pos, ch in enumerate(letters):
+            if pos == ex:
+                self.tiles.append((ch, pos, n - 1, "extra"))
+                continue
+            j = next(i for i, c in enumerate(rd) if c == ch and i not in used)
+            used.add(j)
+            self.tiles.append((ch, pos, j, "a"))
+        self.extra = ex
+        self.rows = {"a": None}
+        self.x_slots = [self._slot_x(i, n) for i in range(n)]
+        self.target_xy = {}
+        for ch, pos, tgt, grp in self.tiles:
+            self.target_xy[pos] = (self.x_slots[tgt], self.y)
+        self.sprites = {}
+        for ch, pos, tgt, grp in self.tiles:
+            self.sprites[(pos, "n")] = tile_sprite(ch, self.tile, WHITE, INK, 0.6)
+            self.sprites[(pos, "c")] = (tile_sprite(ch, self.tile, GRAY, GRAY_TEXT, 0.6) if grp == "extra"
+                                        else tile_sprite(ch, self.tile, SKY, WHITE, 0.6))
+            self.sprites[(pos, "h")] = tile_sprite(ch, self.tile, HINT_FILL, INK, 0.6)
+        self.hint_pos = next(pos for ch, pos, tgt, grp in self.tiles if grp == "a" and tgt == 0)
         self.halo = halo_sprite(self.tile)
-        self.hint_tile = tile_sprite(rd[0], self.tile, HINT_FILL, INK, 0.6)
-        self.name_spr = rich_sprite([(self.pref.name + self.pref.suffix, SKY)], 110, stroke=10)
-        self.shown = "".join(rd[j] for j in self.perm)
-        self.key = f"anagram:{self.pref.name}"
-        self.q_lines = [[("ならべかえると", INK)],
-                        [("都道府県", SKY), ("になるよ！", INK)]]
-        self.q_tts = "ならべかえると、都道府県になるよ！"
+        self.name_spr = rich_sprite([(pref.name + pref.suffix, SKY)], 110, stroke=10)
+        self.shown = "".join(letters)
+        self.key = f"anagram:{pref.name}"
+        if extra:
+            self.q_lines = [[("ならべかえると ", INK), ("都道府県", SKY)],
+                            [("1文字", PINK), (" あまるよ！", INK)]]
+            self.q_tts = "ならべかえると、都道府県になるよ。いちもじ、あまるよ！"
+        else:
+            self.q_lines = [[("ならべかえると", INK)],
+                            [("都道府県", SKY), ("になるよ！", INK)]]
+            self.q_tts = "ならべかえると、都道府県になるよ！"
         self.ans_tts = rd + "！"
         self.banner = None          # 答えは盤面に大きく出す
         self.hint_text = f"ヒント：さいしょは「{rd[0]}」"
         self.n_flips = 1
 
-    def title(self, k):
-        return f"【ならべかえ】「{self.shown}」はどこの都道府県？5秒でわかる？ #脳トレ #クイズ"
+    # 2つの県(★★★)
+    def _init_pair(self, rng, avoid):
+        pairs = nd.anagram_pairs()
+        rng.shuffle(pairs)
+        for p, q in pairs:
+            key = "anagram2:" + ",".join(sorted((p.name, q.name)))
+            if key in avoid or not nd.pair_is_unique(p, q):
+                continue
+            break
+        else:
+            raise RuntimeError("2県まざりの問題が作れませんでした")
+        if rng.random() < 0.5:
+            p, q = q, p
+        order = nd.make_anagram_pair(rng, p, q)
+        n = len(order)
+        self.tile, self.gap = tile_row_size(n)
+        self.x_slots = [self._slot_x(i, n) for i in range(n)]
+        rows = {0: (p, self.y - 96), 1: (q, self.y + 96)}
+        self.tiles, self.target_xy, self.sprites = [], {}, {}
+        for pos, (ch, which, idx) in enumerate(order):
+            pref, ry = rows[which]
+            tx = self._slot_x(idx, len(pref.reading))
+            self.tiles.append((ch, pos, idx, "a" if which == 0 else "b"))
+            self.target_xy[pos] = (tx, ry)
+            col = SKY if which == 0 else PINK
+            self.sprites[(pos, "n")] = tile_sprite(ch, self.tile, WHITE, INK, 0.6)
+            self.sprites[(pos, "c")] = tile_sprite(ch, self.tile, col, WHITE, 0.6)
+            self.sprites[(pos, "h")] = tile_sprite(ch, self.tile, HINT_FILL, INK, 0.6)
+        self.hint_pos = next(pos for pos, (ch, which, idx) in enumerate(order) if which == 0 and idx == 0)
+        self.halo = halo_sprite(self.tile)
+        self.name_spr = None
+        self.pair = (p, q)
+        self.shown = "".join(ch for ch, _, _ in order)
+        self.key = "anagram2:" + ",".join(sorted((p.name, q.name)))
+        self.q_lines = [[("都道府県が ", INK), ("2つ", PINK)],
+                        [("まざってるよ！", INK)]]
+        self.q_tts = "都道府県が、ふたつ、まざってるよ！"
+        self.ans_tts = f"{p.reading}と、{q.reading}！"
+        self.banner_segs = [(p.name + p.suffix, SKY), ("・", INK), (q.name + q.suffix, PINK)]
+        self.banner = p.name + p.suffix + "・" + q.name + q.suffix
+        self.hint_text = f"ヒント：1つは「{p.reading[0]}」から"
+        self.n_flips = 1
 
-    def slot_x(self, i):
-        return self.x0 + i * (self.tile + self.gap) + self.tile / 2
+    def _slot_x(self, i, n):
+        total = n * self.tile + (n - 1) * self.gap
+        return (W - total) / 2 + i * (self.tile + self.gap) + self.tile / 2
+
+    def title(self, k):
+        if self.level == 3:
+            return f"【ならべかえ・上級】「{self.shown}」に都道府県が2つまざってる！わかる？ #脳トレ #クイズ"
+        if self.level == 2:
+            return f"【ならべかえ】「{self.shown}」で都道府県を作って！1文字あまるよ #脳トレ #クイズ"
+        return f"【ならべかえ】「{self.shown}」はどこの都道府県？5秒でわかる？ #脳トレ #クイズ"
 
     def draw(self, img, t, T):
         move_t0, move_dur = T["ans0"], 0.7
         done = t >= T["flip"][0]
-        for pos, j in enumerate(self.perm):
-            x_from, x_to = self.slot_x(pos), self.slot_x(j)
+        n = len(self.tiles)
+        for ch, pos, tgt, grp in self.tiles:
+            x_from, y_from = self.x_slots[pos], self.y
+            x_to, y_to = self.target_xy[pos]
             p = ease_io((t - move_t0) / move_dur) if t >= move_t0 else 0.0
             x = x_from + (x_to - x_from) * p
-            lift = math.sin(math.pi * p) * 90 * (1 if x_to > x_from else -1) if x_to != x_from else 0
-            y = self.y - lift
-            if j == 0 and T["hint"] <= t < T["ans0"] and not done:
+            y = y_from + (y_to - y_from) * p
+            if x_to != x_from and y_to == y_from:
+                y -= math.sin(math.pi * p) * 90 * (1 if x_to > x_from else -1)
+            if pos == self.hint_pos and T["hint"] <= t < T["ans0"]:
                 pulse = 0.5 + 0.5 * math.sin((t - T["hint"]) * 2 * math.pi * 1.6)
                 paste_center(img, self.halo, x, y, alpha=0.5 + 0.5 * pulse)
-                paste_center(img, self.hint_tile, x, y, scale=1.04 + 0.06 * pulse)
+                paste_center(img, self.sprites[(pos, "h")], x, y, scale=1.04 + 0.06 * pulse)
                 continue
-            wv = t - (0.3 + pos * 0.08)
+            wv = t - (0.3 + pos * 0.07)
             sc = 1 + 0.08 * math.sin(math.pi * wv / 0.3) if 0 < wv < 0.3 else 1.0
             if done:
                 bp = (t - T["flip"][0]) / 0.3
                 sc = 1 + 0.12 * max(0.0, 1 - bp) * math.sin(math.pi * clamp01(bp))
-                paste_center(img, self.colored[j], x, y, scale=sc)
+                if grp == "extra":
+                    sc = 0.8
+                paste_center(img, self.sprites[(pos, "c")], x, y, scale=sc)
             else:
-                paste_center(img, self.normal[j], x, y, scale=sc)
-        if done:
+                paste_center(img, self.sprites[(pos, "n")], x, y, scale=sc)
+        if done and self.name_spr is not None:
             paste_center(img, self.name_spr, W / 2, 985, scale=pop_scale(t, T["flip"][0] + 0.05))
+        if done and self.extra is not None:
+            d = ImageDraw.Draw(img)
+            x = self.x_slots[n - 1]
+            k = pop_scale(t, T["flip"][0] + 0.1)
+            if k > 0.05:
+                d.text((x, self.y + self.tile * 0.62), "あまり", font=fnt(max(8, int(34 * k))),
+                       fill=GRAY_TEXT, anchor="mm")
 
 
 class CapitalBoard:
+    """県庁所在地. ★=同じ県の市から3択 / ★★=まぎらわしい県庁所在地の3択 / ★★★=市から県を当てる4択."""
     kind = "capital"
 
-    def __init__(self, rng, avoid):
-        cands = [p for p in nd.CAPITAL_QUIZ if f"capital:{p.name}" not in avoid]
-        self.pref = rng.choice(cands or nd.CAPITAL_QUIZ)
-        self.opts, self.correct = nd.capital_options(rng, self.pref)
-        wrong = [i for i in range(3) if i != self.correct]
+    def __init__(self, rng, avoid, level=2):
+        level_setup(self, self.kind, level)
+        self.reverse = level == 3
+        prefix = "capital3:" if self.reverse else "capital:"
+        pool = nd.CAPITAL_QUIZ if level == 1 else [nd.BY_NAME[n] for n in nd.CAPITAL_HARD]
+        cands = [p for p in pool if f"{prefix}{p.name}" not in avoid]
+        self.pref = p = rng.choice(cands or pool)
+        if level == 1:
+            opts, self.correct = nd.capital_options(rng, p)
+            labels = [f"{c}市" for c in opts]
+        elif level == 2:
+            opts, self.correct = nd.capital_options_hard(rng, p)
+            labels = [f"{c}市" for c in opts]
+        else:
+            opts, self.correct = nd.city_to_pref_options(rng, p)
+            labels = [f"{o.name}{o.suffix}" for o in opts]
+        self.opts = opts
+        wrong = [i for i in range(len(opts)) if i != self.correct]
         self.removed = rng.choice(wrong)                      # ヒントで消す選択肢
-        self.bw, self.bh = 780, 150
-        self.ys = [640, 822, 1004]
-        letters = "ABC"
+        n = len(opts)
+        self.bw, self.bh = 780, (150 if n == 3 else 124)
+        self.ys = [640, 822, 1004] if n == 3 else [620, 766, 912, 1058]
+        letters = "ABCD"
         self.spr = {}
-        for i, city in enumerate(self.opts):
-            label = f"{city}市"
+        for i, label in enumerate(labels):
             self.spr[(i, "normal")] = self.button(letters[i], label, WHITE, INK, MINT)
             self.spr[(i, "correct")] = self.button(letters[i], label, MINT, WHITE, WHITE, MINT)
             self.spr[(i, "wrong")] = self.button(letters[i], label, GRAY, GRAY_TEXT, GRAY_TEXT)
-        p = self.pref
         office = "道庁" if p.suffix == "" else "県庁"
         office_tts = "どうちょう" if p.suffix == "" else "けんちょう"
-        self.key = f"capital:{p.name}"
-        self.q_lines = [[(f"{p.name}{p.suffix}", MINT), ("の", INK)],
-                        [(f"{office}所在地", INK), ("は？", INK)]]
-        self.q_tts = f"{p.reading}{nd.SUFFIX_READING[p.suffix]}の、{office_tts}しょざいちは？"
-        letter_tts = ["エー", "ビー", "シー"][self.correct]
-        self.ans_tts = f"{letter_tts}、{p.capital_reading}し！"
-        self.banner = f"{p.capital}市（{p.capital_reading}し）"
-        self.hint_text = "ヒント：1つ消すよ！"
+        letter_tts = ["エー", "ビー", "シー", "ディー"][self.correct]
         self.office = office
+        if self.reverse:
+            self.key = f"capital3:{p.name}"
+            self.q_lines = [[(f"{p.capital}市", MINT), ("は", INK)],
+                            [("何県の", INK), ("県庁所在地", INK), ("？", INK)]]
+            self.q_tts = f"{p.capital_reading}しは、なにけんの、けんちょうしょざいち？"
+            self.ans_tts = f"{letter_tts}、{p.reading}{nd.SUFFIX_READING[p.suffix]}！"
+            self.banner = f"{p.capital}市は{p.name}{p.suffix}"
+        else:
+            self.key = f"capital:{p.name}"
+            self.q_lines = [[(f"{p.name}{p.suffix}", MINT), ("の", INK)],
+                            [(f"{office}所在地", INK), ("は？", INK)]]
+            self.q_tts = f"{p.reading}{nd.SUFFIX_READING[p.suffix]}の、{office_tts}しょざいちは？"
+            self.ans_tts = f"{letter_tts}、{p.capital_reading}し！"
+            self.banner = f"{p.capital}市（{p.capital_reading}し）"
+        self.hint_text = "ヒント：1つ消すよ！"
         self.n_flips = 1
 
     def button(self, letter, text, fill, fg, letter_fill, letter_fg=WHITE):
@@ -547,18 +735,21 @@ class CapitalBoard:
         cx, cy = 4 + 28 + r, 4 + h // 2
         d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=letter_fill, outline=INK, width=5)
         d.text((cx, cy + 2), letter, font=fnt(int(r * 1.15)), fill=letter_fg, anchor="mm")
-        d.text((cx + r + 34, cy + 2), text, font=fnt(68), fill=fg, anchor="lm")
+        d.text((cx + r + 34, cy + 2), text, font=fnt(68 if h >= 150 else 62), fill=fg, anchor="lm")
         return img
 
     def title(self, k):
         p = self.pref
+        if self.reverse:
+            return f"【県庁所在地・上級】{p.capital}市は何県の県庁所在地？4択 #脳トレ #クイズ"
+        if self.level == 2:
+            return f"【{self.office}所在地】{p.name}{p.suffix}の{self.office}所在地は？まちがえやすい3択 #脳トレ #クイズ"
         return f"【{self.office}所在地】{p.name}{p.suffix}の{self.office}所在地は？パッとわかる？ #脳トレ #クイズ"
 
     def draw(self, img, t, T):
         d = ImageDraw.Draw(img)
         shown = t >= T["flip"][0]
-        for i in range(3):
-            y = self.ys[i]
+        for i, y in enumerate(self.ys):
             state = "normal"
             if shown:
                 state = "correct" if i == self.correct else "wrong"
@@ -573,51 +764,91 @@ class CapitalBoard:
                 sc = 1 + 0.05 * math.sin(math.pi * wv / 0.3)
             paste_center(img, self.spr[(i, state)], W / 2, y, scale=sc)
             if state == "wrong" and (not shown) and i == self.removed:
-                # ヒントで消えた選択肢に「×」
                 k = pop_scale(t, T["hint"])
-                s = 34 * k
+                s = 30 * k
                 cx = W / 2 + self.bw / 2 - 90
                 d.line([cx - s, y - s, cx + s, y + s], fill=RED, width=12)
                 d.line([cx - s, y + s, cx + s, y - s], fill=RED, width=12)
         if shown:
             k = pop_scale(t, T["flip"][0], 0.3)
-            r = 92 * k
-            cx, cy = W / 2 - self.bw / 2 + 30 + 53, self.ys[self.correct]
+            r = (self.bh * 0.6) * k
+            cx, cy = W / 2 - self.bw / 2 + 4 + 28 + (self.bh - 44) // 2, self.ys[self.correct]
             if r > 2:
                 d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=RED, width=14)
 
 
 class InitialBoard:
+    """頭文字クイズ. ★=「お」で始まる4文字 / ★★=答え3〜4つ / ★★★=答え4〜6つ(「山」がつく など)."""
     kind = "initial"
 
-    def __init__(self, rng, avoid):
-        pats = nd.initial_patterns()
-        cands = [x for x in pats if f"initial:{x[0]}{x[1]}{x[2]}" not in avoid]
-        self.pos, self.ch, self.n, self.answers = rng.choice(cands or pats)
-        self.tile, self.gap = (150, 18) if self.n <= 4 else (124, 14)
-        total = self.n * self.tile + (self.n - 1) * self.gap
-        self.x0, self.y = (W - total) // 2, 636
-        known = 0 if self.pos == "head" else self.n - 1
-        self.boxes = [tile_sprite(self.ch, self.tile, PURPLE, WHITE, 0.6) if i == known
-                      else tile_sprite("？", self.tile, WHITE, (210, 210, 222), 0.5)
-                      for i in range(self.n)]
+    def __init__(self, rng, avoid, level=2):
+        level_setup(self, self.kind, level)
+        if level == 1:
+            self._init_fixed(rng, avoid)
+        else:
+            lo, hi = (3, 4) if level == 2 else (4, 6)
+            pats = nd.free_patterns(lo, hi)
+            cands = [x for x in pats if f"initial:{x[0]}{x[1]}" not in avoid]
+            self.mode, self.ch, self.answers = rng.choice(cands or pats)
+            self.n = None
+            self._setup_free(rng)
         self.cards = [self.card(p, ANSWER_COLORS[i % len(ANSWER_COLORS)]) for i, p in enumerate(self.answers)]
         self.count_spr = pill_sprite(f"答えは {len(self.answers)}つ！", 50, YELLOW, INK)
         self.reveal_spr = pill_sprite("正解は…", 50, YELLOW, INK)
-        word = "で始まる" if self.pos == "head" else "で終わる"
-        self.key = f"initial:{self.pos}{self.ch}{self.n}"
+        self.ans_tts = "、".join(p.reading for p in self.answers) + "！"
+        self.banner = None
+        self.n_flips = len(self.answers)
+
+    def _init_fixed(self, rng, avoid):
+        pats = nd.initial_patterns()
+        cands = [x for x in pats if f"initial:{x[0]}{x[1]}{x[2]}" not in avoid]
+        pos, self.ch, self.n, self.answers = rng.choice(cands or pats)
+        self.mode = pos
+        self.tile, self.gap = (150, 18) if self.n <= 4 else (124, 14)
+        known = 0 if pos == "head" else self.n - 1
+        self.boxes = [tile_sprite(self.ch, self.tile, PURPLE, WHITE, 0.6) if i == known
+                      else tile_sprite("？", self.tile, WHITE, (210, 210, 222), 0.5)
+                      for i in range(self.n)]
+        word = "で始まる" if pos == "head" else "で終わる"
+        self.key = f"initial:{pos}{self.ch}{self.n}"
         self.q_lines = [[("「", INK), (self.ch, PURPLE), (f"」{word}", INK)],
                         [(f"{self.n}文字の", INK), ("都道府県", PURPLE), ("は？", INK)]]
         num = {2: "に", 3: "さん", 4: "よん", 5: "ご", 6: "ろく"}[self.n]
-        verb = "から始まる" if self.pos == "head" else "で終わる"
+        verb = "から始まる" if pos == "head" else "で終わる"
         self.q_tts = f"{self.ch}、{verb}、{num}もじの、都道府県は？"
-        self.ans_tts = "、".join(p.reading for p in self.answers) + "！"
-        idx = 1 if self.pos == "head" else self.n - 2
+        idx = 1 if pos == "head" else self.n - 2
         hint_chars = sorted({p.reading[idx] for p in self.answers})
-        self.hint_text = f"ヒント：{'2' if self.pos == 'head' else str(self.n - 1)}文字目は「{'・'.join(hint_chars)}」"
-        self.banner = None
-        self.n_flips = len(self.answers)
+        self.hint_text = f"ヒント：{'2' if pos == 'head' else str(self.n - 1)}文字目は「{'・'.join(hint_chars)}」"
         self.word = word
+        self.label = "頭文字クイズ" if pos == "head" else "都道府県クイズ"
+
+    def _setup_free(self, rng):
+        mode, ch = self.mode, self.ch
+        self.tile = 170
+        self.boxes = [tile_sprite(ch, self.tile, PURPLE, WHITE, 0.6)]
+        word = {"head_any": "で始まる", "tail_any": "で終わる", "kanji": "がつく"}[mode]
+        self.word = word
+        self.key = f"initial:{mode}{ch}"
+        self.q_lines = [[("「", INK), (ch, PURPLE), (f"」{word}", INK)],
+                        [("都道府県", PURPLE), (" ぜんぶ言える？", INK)]]
+        if mode == "kanji":
+            self.q_tts = f"{nd.KANJI_READ[ch]}、という漢字がつく、都道府県。ぜんぶいえるかな？"
+            self.label = "漢字クイズ"
+        elif mode == "head_any":
+            self.q_tts = f"{ch}、からはじまる、都道府県。ぜんぶいえるかな？"
+            self.label = "頭文字クイズ"
+        else:
+            self.q_tts = f"{ch}、でおわる、都道府県。ぜんぶいえるかな？"
+            self.label = "都道府県クイズ"
+        # ヒント: 思い出しにくそうな1つの出だしを見せる(「山」なら「和歌…」)
+        pick = rng.choice(self.answers)
+        if mode == "kanji":
+            not_head = [p for p in self.answers if not p.name.startswith(ch)]
+            pick = rng.choice(not_head or self.answers)
+            head = pick.name[:2] if not pick.name.startswith(ch) else pick.name[:1]
+        else:
+            head = pick.reading[:2]
+        self.hint_text = f"ヒント：「{head}…」もあるよ"
 
     def card(self, p, col):
         w, h = 390, 104
@@ -632,15 +863,31 @@ class InitialBoard:
         return img
 
     def title(self, k):
-        return (f"【頭文字クイズ】「{self.ch}」{self.word}{self.n}文字の都道府県は？答えは{len(self.answers)}つ"
-                f" #脳トレ #クイズ")
+        n = len(self.answers)
+        tag = "・上級" if self.level == 3 else ""
+        if self.mode in ("head", "tail"):
+            return (f"【{self.label}】「{self.ch}」{self.word}{self.n}文字の都道府県は？答えは{n}つ"
+                    f" #脳トレ #クイズ")
+        return f"【{self.label}{tag}】「{self.ch}」{self.word}都道府県、ぜんぶ言える？答えは{n}つ #脳トレ #クイズ"
 
     def draw(self, img, t, T):
-        for i, spr in enumerate(self.boxes):
-            x = self.x0 + i * (self.tile + self.gap) + self.tile / 2
-            wv = t - (0.3 + i * 0.08)
+        if self.n is not None:            # ★: 「お□□□」のマス
+            total = self.n * self.tile + (self.n - 1) * self.gap
+            x0 = (W - total) // 2
+            for i, spr in enumerate(self.boxes):
+                x = x0 + i * (self.tile + self.gap) + self.tile / 2
+                wv = t - (0.3 + i * 0.08)
+                sc = 1 + 0.08 * math.sin(math.pi * wv / 0.3) if 0 < wv < 0.3 else 1.0
+                paste_center(img, spr, x, 636, scale=sc)
+        else:                             # ★★/★★★: 大きな1文字 + 「…」
+            wv = t - 0.3
             sc = 1 + 0.08 * math.sin(math.pi * wv / 0.3) if 0 < wv < 0.3 else 1.0
-            paste_center(img, spr, x, self.y, scale=sc)
+            paste_center(img, self.boxes[0], W / 2, 640, scale=sc)
+            d = ImageDraw.Draw(img)
+            if self.mode == "head_any":
+                d.text((W / 2 + 120, 650), "…", font=fnt(90), fill=GRAY_TEXT, anchor="lm")
+            elif self.mode == "tail_any":
+                d.text((W / 2 - 120, 650), "…", font=fnt(90), fill=GRAY_TEXT, anchor="rm")
         label = self.reveal_spr if t >= T["reveal"] else self.count_spr
         paste_center(img, label, W / 2, 800)
         cols = 2
@@ -686,7 +933,7 @@ def plan_timeline(board, clips, count):
     T = {"q": 0.12}
     T["count"] = max(T["q"] + dur["q"] + 0.25, 1.6)
     T["count_end"] = T["count"] + count
-    T["hint"] = T["count"] + count * 0.5
+    T["hint"] = T["count"] + count * board.hint_at
     T["reveal"] = T["count_end"]
     T["ans0"] = T["reveal"] + dur["reveal"] + 0.08
     n = board.n_flips
@@ -802,7 +1049,7 @@ class Short:
         self.board = board
         self.no = no
         self.kind = KINDS[board.kind]
-        self.count = self.kind["count"]
+        self.count = board.count
         pick = random.Random(f"lines-{seed}")
         cta_tts, cta_big, cta_small = pick.choice(CTA_LINES)
         clips = {
@@ -815,7 +1062,8 @@ class Short:
         self.T = plan_timeline(board, clips, self.count)
         self.audio, self.env = build_audio(clips, self.T, self.count, use_bgm)
         self.pattern, self.period = bg_pattern()
-        self.header = pill_sprite(f"第{no}問  {self.kind['label']}", 46, self.kind["color"])
+        stars = "★" * board.level + "☆" * (3 - board.level)
+        self.header = pill_sprite(f"第{no}問  {board.label}  {stars}", 44, self.kind["color"])
         self.q_sprites = [rich_sprite(line, 76) for line in board.q_lines]
         self.cta_sprites = [rich_sprite(cta_big, 84), rich_sprite([(cta_small, INK)], 54)]
         self.reveal_banner = pill_sprite("正解は…", 54, YELLOW, INK)
@@ -976,6 +1224,8 @@ def main():
     ap.add_argument("--count", type=int, default=21, help="作る本数(既定21 = 1週間分)")
     ap.add_argument("--start", default=None, help="最初の投稿日 YYYY-MM-DD(既定: 明日)")
     ap.add_argument("--only", choices=list(BOARDS), help="この形式だけ作る")
+    ap.add_argument("--level", type=int, choices=[1, 2, 3],
+                    help="むずかしさ(1=かんたん 2=ふつう 3=むずかしい)。省略時は時間帯ごと(7時・12時=2、18時=3)")
     ap.add_argument("--voice", choices=list(VOICE_SETS), default="A")
     ap.add_argument("--no-bgm", action="store_true")
     ap.add_argument("--engine", choices=["auto", "voicevox", "openjtalk"], default="auto")
@@ -993,7 +1243,9 @@ def main():
     used = set(state["used"])
     if args.sample:
         start = None
-        plan = [(None, k) for k in ([args.only] if args.only else list(BOARDS))]
+        kinds = [args.only] if args.only else list(BOARDS)
+        levels = [args.level] if args.level else [2, 3]
+        plan = [(None, k, lv) for lv in levels for k in kinds]
         out_dir = Path(args.out) / "sample"
     else:
         start = (dt.date.fromisoformat(args.start) if args.start
@@ -1001,10 +1253,10 @@ def main():
         plan = []
         day, slot = 0, 0
         while len(plan) < args.count:
-            when, kinds = SLOTS[slot]
+            when, kinds, slot_level = SLOTS[slot]
             kind = args.only or kinds[day % len(kinds)]
             date = start + dt.timedelta(days=day)
-            plan.append((f"{date.isoformat()} {when}", kind))
+            plan.append((f"{date.isoformat()} {when}", kind, args.level or slot_level))
             slot += 1
             if slot == len(SLOTS):
                 slot, day = 0, day + 1
@@ -1013,17 +1265,17 @@ def main():
 
     lines = []
     no = state["next_no"]
-    for i, (when, kind) in enumerate(plan):
-        seed = f"{no}-{kind}-{len(used)}"
+    for i, (when, kind, level) in enumerate(plan):
+        seed = f"{no}-{kind}-{level}-{len(used)}"
         rng = random.Random(seed)
-        board = BOARDS[kind](rng, used)
+        board = BOARDS[kind](rng, used, level)
         kcount = state["kind_count"].get(kind, 0) + 1
         title = board.title(kcount)
         mp4 = out_dir / (safe_name(title) + ".mp4")
         short = Short(board, no, voice, not args.no_bgm, seed)
         short.render(mp4, out_dir / "_audio.wav")
         print(f"[{i + 1}/{len(plan)}] {short.T['total']:.1f}秒  {title}")
-        lines.append(f"{when or '見本'}  {title}")
+        lines.append(f"{when or '見本'}  {'★' * level}  {title}")
         if not args.sample:
             used.add(board.key)
             state["kind_count"][kind] = kcount
